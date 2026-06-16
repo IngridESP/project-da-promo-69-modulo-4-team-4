@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.neighbors import BallTree
+import csv
 
 # ── CARGAR DATOS ──────────────────────────────────────────────
 df_base = pd.read_csv('Worldwide Travel Cities Dataset.csv')
@@ -12,14 +13,12 @@ print(f"UNESCO Ciudades Creativas: {len(df_uccn)} entradas")
 print(f"UNESCO World Heritage Sites: {len(df_wh)} sitios")
 
 # ── JOIN 1: UNESCO CIUDADES CREATIVAS ─────────────────────────
-# Normalizar nombres para el match
 df_base['city_norm'] = df_base['city'].str.strip().str.lower()
 df_uccn['city_norm'] = df_uccn['Título EN'].str.strip().str.lower()
 
 df_uccn_clean = df_uccn[['city_norm', 'Términos', 'Fecha']].copy()
 df_uccn_clean.columns = ['city_norm', 'creative_city_category', 'creative_city_year']
 
-# Join por nombre de ciudad
 df_merged = df_base.merge(df_uccn_clean, on='city_norm', how='left')
 
 # Desambiguar Granada: España (Literatura, 2014) vs Nicaragua (Diseño, 2023)
@@ -28,39 +27,37 @@ nicaragua_mask = (df_merged['city_norm'] == 'granada') & (df_merged['country'] =
 other_mask     = df_merged['city_norm'] != 'granada'
 df_merged = df_merged[other_mask | spain_mask | nicaragua_mask].copy()
 
+# Renombrar Granadas para distinguirlas en Tableau
+df_merged.loc[(df_merged['city'] == 'Granada') & (df_merged['country'] == 'Spain'), 'city'] = 'Granada (Spain)'
+df_merged.loc[(df_merged['city'] == 'Granada') & (df_merged['country'] == 'Nicaragua'), 'city'] = 'Granada (Nicaragua)'
+
 print(f"\nJOIN 1 completado: {len(df_merged)} filas | {df_merged['creative_city_category'].notna().sum()} ciudades con categoría creativa UNESCO")
 
 # ── JOIN 2: UNESCO WORLD HERITAGE SITES ───────────────────────
-# Eliminar sitios sin coordenadas
 df_wh = df_wh.dropna(subset=['latitude', 'longitude']).copy()
 
-# BallTree con distancia Haversine (coordenadas esféricas)
 cities_coords = np.radians(df_merged[['latitude', 'longitude']].values)
 wh_coords     = np.radians(df_wh[['latitude', 'longitude']].values)
 
 tree = BallTree(cities_coords, metric='haversine')
 distances, indices = tree.query(wh_coords, k=1)
-distances_km = distances.flatten() * 6371  # Radio terrestre en km
+distances_km = distances.flatten() * 6371
 
 df_wh['city_idx']    = indices.flatten()
 df_wh['distance_km'] = distances_km
 
-# Umbral: sitios a menos de 50km de la ciudad
 UMBRAL_KM = 50
 df_wh_cerca = df_wh[df_wh['distance_km'] <= UMBRAL_KM].copy()
 
-# Agregar por ciudad: número de sitios + nombres concatenados con " | "
 agg = df_wh_cerca.groupby('city_idx').agg(
     unesco_wh_count=('name_en', 'count'),
     unesco_wh_names=('name_en', lambda x: ' | '.join(x))
 ).reset_index()
 
-# Unir al dataset principal
 df_merged = df_merged.reset_index(drop=True)
 df_merged['city_idx'] = df_merged.index
 df_merged = df_merged.merge(agg, on='city_idx', how='left')
 
-# Rellenar ciudades sin sitios cercanos
 df_merged['unesco_wh_count'] = df_merged['unesco_wh_count'].fillna(0).astype(int)
 df_merged['unesco_wh_names'] = df_merged['unesco_wh_names'].fillna('')
 
@@ -69,8 +66,14 @@ print(f"JOIN 2 completado: {(df_merged['unesco_wh_count'] > 0).sum()} ciudades c
 # ── EXPORTAR ──────────────────────────────────────────────────
 df_final = df_merged.drop(columns=['city_norm', 'city_idx'])
 
+# Arreglar año (evitar 2014.0)
+df_final['creative_city_year'] = df_final['creative_city_year'].fillna(0).astype(int)
+
+# Renombrar seclusion
+df_final = df_final.rename(columns={'seclusion': 'remoteness'})
+
 output_path = 'travel_cities_enriched.csv'
-df_final.to_csv(output_path, index=False)
+df_final.to_csv(output_path, index=False, quoting=csv.QUOTE_ALL)
 
 print(f"\n✅ CSV exportado: {output_path}")
 print(f"   Filas: {len(df_final)} | Columnas: {len(df_final.columns)}")
